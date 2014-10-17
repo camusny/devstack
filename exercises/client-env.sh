@@ -2,14 +2,14 @@
 
 # **client-env.sh**
 
-# Test OpenStack client enviroment variable handling
+# Test OpenStack client environment variable handling
 
 echo "*********************************************************************"
 echo "Begin DevStack Exercise: $0"
 echo "*********************************************************************"
 
 # This script exits on an error so that errors don't compound and you see
-# only the first error that occured.
+# only the first error that occurred.
 set -o errexit
 
 # Print the commands being run so that we can see the command that triggers
@@ -28,7 +28,7 @@ TOP_DIR=$(cd $EXERCISE_DIR/..; pwd)
 source $TOP_DIR/functions
 
 # Import configuration
-source $TOP_DIR/openrc
+source $TOP_DIR/openrc admin
 
 # Import exercise configuration
 source $TOP_DIR/exerciserc
@@ -64,7 +64,7 @@ if [[ "$ENABLED_SERVICES" =~ "key" ]]; then
         STATUS_KEYSTONE="Skipped"
     else
         echo -e "\nTest Keystone"
-        if keystone catalog --service identity; then
+        if openstack endpoint show identity; then
             STATUS_KEYSTONE="Succeeded"
         else
             STATUS_KEYSTONE="Failed"
@@ -132,7 +132,7 @@ if [[ "$ENABLED_SERVICES" =~ "g-api" ]]; then
         STATUS_GLANCE="Skipped"
     else
         echo -e "\nTest Glance"
-        if glance image-list; then
+        if openstack image list; then
             STATUS_GLANCE="Succeeded"
         else
             STATUS_GLANCE="Failed"
@@ -165,7 +165,7 @@ set +o xtrace
 # Results
 # =======
 
-function report() {
+function report {
     if [[ -n "$2" ]]; then
         echo "$1: $2"
     fi

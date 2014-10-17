@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# This script is a level script
-# It must be run on a XenServer or XCP machine
+# This script must be run on a XenServer or XCP machine
 #
 # It creates a DomU VM that runs OpenStack services
 #
 # For more details see: README.md
 
-# Exit on errors
 set -o errexit
-# Echo commands
+set -o nounset
 set -o xtrace
+
+export LC_ALL=C
 
 # Abort if localrc is not set
 if [ ! -e ../../localrc ]; then
@@ -31,19 +31,22 @@ THIS_DIR=$(cd $(dirname "$0") && pwd)
 # xapi functions
 . $THIS_DIR/functions
 
+# Determine what system we are running on.
+# Might not be XenServer if we're using xenserver-core
+GetDistro
 
 #
 # Get Settings
 #
 
 # Source params - override xenrc params in your localrc to suit your taste
-source xenrc
+source $THIS_DIR/xenrc
 
 xe_min()
 {
-  local cmd="$1"
-  shift
-  xe "$cmd" --minimal "$@"
+    local cmd="$1"
+    shift
+    xe "$cmd" --minimal "$@"
 }
 
 #
@@ -53,120 +56,69 @@ xe_min()
 
 cd $THIS_DIR
 
-# Install plugins
+# Die if multiple hosts listed
+if have_multiple_hosts; then
+    cat >&2 << EOF
+ERROR: multiple hosts found. This might mean that the XenServer is a member
+of a pool - Exiting.
+EOF
+    exit 1
+fi
 
-## Nova plugins
-NOVA_ZIPBALL_URL=${NOVA_ZIPBALL_URL:-$(zip_snapshot_location $NOVA_REPO $NOVA_BRANCH)}
-install_xapi_plugins_from_zipball $NOVA_ZIPBALL_URL
+# Install plugins
 
 ## Install the netwrap xapi plugin to support agent control of dom0 networking
 if [[ "$ENABLED_SERVICES" =~ "q-agt" && "$Q_PLUGIN" = "openvswitch" ]]; then
-    QUANTUM_ZIPBALL_URL=${QUANTUM_ZIPBALL_URL:-$(zip_snapshot_location $QUANTUM_REPO $QUANTUM_BRANCH)}
-    install_xapi_plugins_from_zipball $QUANTUM_ZIPBALL_URL
+    NEUTRON_ZIPBALL_URL=${NEUTRON_ZIPBALL_URL:-$(zip_snapshot_location $NEUTRON_REPO $NEUTRON_BRANCH)}
+    EXTRACTED_NEUTRON=$(extract_remote_zipball "$NEUTRON_ZIPBALL_URL")
+    install_xapi_plugins_from "$EXTRACTED_NEUTRON"
+    rm -rf "$EXTRACTED_NEUTRON"
 fi
-
-create_directory_for_kernels
 
 #
 # Configure Networking
 #
 
-# Helper to create networks
-# Uses echo trickery to return network uuid
-function create_network() {
-    br=$1
-    dev=$2
-    vlan=$3
-    netname=$4
-    if [ -z $br ]
-    then
-        pif=$(xe_min pif-list device=$dev VLAN=$vlan)
-        if [ -z $pif ]
-        then
-            net=$(xe network-create name-label=$netname)
-        else
-            net=$(xe_min network-list  PIF-uuids=$pif)
-        fi
-        echo $net
-        return 0
-    fi
-    if [ ! $(xe_min network-list  params=bridge | grep -w --only-matching $br) ]
-    then
-        echo "Specified bridge $br does not exist"
-        echo "If you wish to use defaults, please keep the bridge name empty"
+MGT_NETWORK=`xe pif-list management=true params=network-uuid minimal=true`
+MGT_BRIDGE_OR_NET_NAME=`xe network-list uuid=$MGT_NETWORK params=bridge minimal=true`
+
+setup_network "$VM_BRIDGE_OR_NET_NAME"
+setup_network "$MGT_BRIDGE_OR_NET_NAME"
+setup_network "$PUB_BRIDGE_OR_NET_NAME"
+
+# With neutron, one more network is required, which is internal to the
+# hypervisor, and used by the VMs
+if is_service_enabled neutron; then
+    setup_network "$XEN_INT_BRIDGE_OR_NET_NAME"
+fi
+
+if parameter_is_specified "FLAT_NETWORK_BRIDGE"; then
+    if [ "$(bridge_for "$VM_BRIDGE_OR_NET_NAME")" != "$(bridge_for "$FLAT_NETWORK_BRIDGE")" ]; then
+        cat >&2 << EOF
+ERROR: FLAT_NETWORK_BRIDGE is specified in localrc file, and either no network
+found on XenServer by searching for networks by that value as name-label or
+bridge name or the network found does not match the network specified by
+VM_BRIDGE_OR_NET_NAME. Please check your localrc file.
+EOF
         exit 1
-    else
-        net=$(xe_min network-list  bridge=$br)
-        echo $net
     fi
-}
-
-function errorcheck() {
-    rc=$?
-    if [ $rc -ne 0 ]
-    then
-        exit $rc
-    fi
-}
-
-# Create host, vm, mgmt, pub networks on XenServer
-VM_NET=$(create_network "$VM_BR" "$VM_DEV" "$VM_VLAN" "vmbr")
-errorcheck
-MGT_NET=$(create_network "$MGT_BR" "$MGT_DEV" "$MGT_VLAN" "mgtbr")
-errorcheck
-PUB_NET=$(create_network "$PUB_BR" "$PUB_DEV" "$PUB_VLAN" "pubbr")
-errorcheck
-
-# Helper to create vlans
-function create_vlan() {
-    dev=$1
-    vlan=$2
-    net=$3
-    # VLAN -1 refers to no VLAN (physical network)
-    if [ $vlan -eq -1 ]
-    then
-        return
-    fi
-    if [ -z $(xe_min vlan-list  tag=$vlan) ]
-    then
-        pif=$(xe_min pif-list  network-uuid=$net)
-        # We created a brand new network this time
-        if [ -z $pif ]
-        then
-            pif=$(xe_min pif-list  device=$dev VLAN=-1)
-            xe vlan-create pif-uuid=$pif vlan=$vlan network-uuid=$net
-        else
-            echo "VLAN does not exist but PIF attached to this network"
-            echo "How did we reach here?"
-            exit 1
-        fi
-    fi
-}
-
-# Create vlans for vm and management
-create_vlan $PUB_DEV $PUB_VLAN $PUB_NET
-create_vlan $VM_DEV $VM_VLAN $VM_NET
-create_vlan $MGT_DEV $MGT_VLAN $MGT_NET
-
-# Get final bridge names
-if [ -z $VM_BR ]; then
-    VM_BR=$(xe_min network-list  uuid=$VM_NET params=bridge)
-fi
-if [ -z $MGT_BR ]; then
-    MGT_BR=$(xe_min network-list  uuid=$MGT_NET params=bridge)
-fi
-if [ -z $PUB_BR ]; then
-    PUB_BR=$(xe_min network-list  uuid=$PUB_NET params=bridge)
 fi
 
-# dom0 ip, XenAPI is assumed to be listening
-HOST_IP=${HOST_IP:-`ifconfig xenbr0 | grep "inet addr" | cut -d ":" -f2 | sed "s/ .*//"`}
+if ! xenapi_is_listening_on "$MGT_BRIDGE_OR_NET_NAME"; then
+    cat >&2 << EOF
+ERROR: XenAPI does not have an assigned IP address on the management network.
+please review your XenServer network configuration / localrc file.
+EOF
+    exit 1
+fi
+
+HOST_IP=$(xenapi_ip_on "$MGT_BRIDGE_OR_NET_NAME")
 
 # Set up ip forwarding, but skip on xcp-xapi
 if [ -a /etc/sysconfig/network ]; then
     if ! grep -q "FORWARD_IPV4=YES" /etc/sysconfig/network; then
-      # FIXME: This doesn't work on reboot!
-      echo "FORWARD_IPV4=YES" >> /etc/sysconfig/network
+        # FIXME: This doesn't work on reboot!
+        echo "FORWARD_IPV4=YES" >> /etc/sysconfig/network
     fi
 fi
 # Also, enable ip forwarding in rc.local, since the above trick isn't working
@@ -194,9 +146,7 @@ if [ "$DO_SHUTDOWN" = "1" ]; then
     # Destroy any instances that were launched
     for uuid in `xe vm-list | grep -1 instance | grep uuid | sed "s/.*\: //g"`; do
         echo "Shutting down nova instance $uuid"
-        xe vm-unpause uuid=$uuid || true
-        xe vm-shutdown uuid=$uuid || true
-        xe vm-destroy uuid=$uuid
+        xe vm-uninstall uuid=$uuid force=true
     done
 
     # Destroy orphaned vdis
@@ -212,22 +162,21 @@ fi
 #
 
 GUEST_NAME=${GUEST_NAME:-"DevStackOSDomU"}
-TNAME="devstack_template"
-SNAME_PREPARED="template_prepared"
+TNAME="jeos_template_for_devstack"
+SNAME_TEMPLATE="jeos_snapshot_for_devstack"
 SNAME_FIRST_BOOT="before_first_boot"
 
-function wait_for_VM_to_halt() {
+function wait_for_VM_to_halt {
     set +x
     echo "Waiting for the VM to halt.  Progress in-VM can be checked with vncviewer:"
     mgmt_ip=$(echo $XENAPI_CONNECTION_URL | tr -d -c '1234567890.')
-    domid=$(xe vm-list name-label="$GUEST_NAME" params=dom-id minimal=true)
+    domid=$(get_domid "$GUEST_NAME")
+    sleep 20 # Wait for the vnc-port to be written
     port=$(xenstore-read /local/domain/$domid/console/vnc-port)
-    echo "vncviewer -via $mgmt_ip localhost:${port:2}"
-    while true
-    do
+    echo "vncviewer -via root@$mgmt_ip localhost:${port:2}"
+    while true; do
         state=$(xe_min vm-list name-label="$GUEST_NAME" power-state=halted)
-        if [ -n "$state" ]
-        then
+        if [ -n "$state" ]; then
             break
         else
             echo -n "."
@@ -242,6 +191,7 @@ if [ -z "$templateuuid" ]; then
     #
     # Install Ubuntu over network
     #
+    UBUNTU_INST_BRIDGE_OR_NET_NAME=${UBUNTU_INST_BRIDGE_OR_NET_NAME:-"$MGT_BRIDGE_OR_NET_NAME"}
 
     # always update the preseed file, incase we have a newer one
     PRESEED_URL=${PRESEED_URL:-""}
@@ -253,19 +203,29 @@ if [ -z "$templateuuid" ]; then
             mkdir -p $HTTP_SERVER_LOCATION
         fi
         cp -f $THIS_DIR/devstackubuntupreseed.cfg $HTTP_SERVER_LOCATION
-        MIRROR=${MIRROR:-""}
-        if [ -n "$MIRROR" ]; then
-            sed -e "s,d-i mirror/http/hostname string .*,d-i mirror/http/hostname string $MIRROR," \
-                -i "${HTTP_SERVER_LOCATION}/devstackubuntupreseed.cfg"
-        fi
+
+        sed \
+            -e "s,\(d-i mirror/http/hostname string\).*,\1 $UBUNTU_INST_HTTP_HOSTNAME,g" \
+            -e "s,\(d-i mirror/http/directory string\).*,\1 $UBUNTU_INST_HTTP_DIRECTORY,g" \
+            -e "s,\(d-i mirror/http/proxy string\).*,\1 $UBUNTU_INST_HTTP_PROXY,g" \
+            -e "s,\(d-i passwd/root-password password\).*,\1 $GUEST_PASSWORD,g" \
+            -e "s,\(d-i passwd/root-password-again password\).*,\1 $GUEST_PASSWORD,g" \
+            -i "${HTTP_SERVER_LOCATION}/devstackubuntupreseed.cfg"
     fi
 
     # Update the template
     $THIS_DIR/scripts/install_ubuntu_template.sh $PRESEED_URL
 
-    # create a new VM with the given template
-    # creating the correct VIFs and metadata
-    $THIS_DIR/scripts/install-os-vpx.sh -t "$UBUNTU_INST_TEMPLATE_NAME" -v $VM_BR -m $MGT_BR -p $PUB_BR -l $GUEST_NAME -r $OSDOMU_MEM_MB -k "flat_network_bridge=${VM_BR}"
+    # create a new VM from the given template with eth0 attached to the given
+    # network
+    $THIS_DIR/scripts/install-os-vpx.sh \
+        -t "$UBUNTU_INST_TEMPLATE_NAME" \
+        -n "$UBUNTU_INST_BRIDGE_OR_NET_NAME" \
+        -l "$GUEST_NAME"
+
+    set_vm_memory "$GUEST_NAME" "$OSDOMU_MEM_MB"
+
+    xe vm-start vm="$GUEST_NAME"
 
     # wait for install to finish
     wait_for_VM_to_halt
@@ -274,21 +234,8 @@ if [ -z "$templateuuid" ]; then
     vm_uuid=$(xe_min vm-list name-label="$GUEST_NAME")
     xe vm-param-set actions-after-reboot=Restart uuid="$vm_uuid"
 
-    #
-    # Prepare VM for DevStack
-    #
-
-    # Install XenServer tools, and other such things
-    $THIS_DIR/prepare_guest_template.sh "$GUEST_NAME"
-
-    # start the VM to run the prepare steps
-    xe vm-start vm="$GUEST_NAME"
-
-    # Wait for prep script to finish and shutdown system
-    wait_for_VM_to_halt
-
     # Make template from VM
-    snuuid=$(xe vm-snapshot vm="$GUEST_NAME" new-name-label="$SNAME_PREPARED")
+    snuuid=$(xe vm-snapshot vm="$GUEST_NAME" new-name-label="$SNAME_TEMPLATE")
     xe snapshot-clone uuid=$snuuid new-name-label="$TNAME"
 else
     #
@@ -297,71 +244,141 @@ else
     vm_uuid=$(xe vm-install template="$TNAME" new-name-label="$GUEST_NAME")
 fi
 
+if [ -n "${EXIT_AFTER_JEOS_INSTALLATION:-}" ]; then
+    echo "User requested to quit after JEOS instalation"
+    exit 0
+fi
+
+#
+# Prepare VM for DevStack
+#
+
+# Install XenServer tools, and other such things
+$THIS_DIR/prepare_guest_template.sh "$GUEST_NAME"
+
+# Set virtual machine parameters
+set_vm_memory "$GUEST_NAME" "$OSDOMU_MEM_MB"
+
+# Max out VCPU count for better performance
+max_vcpus "$GUEST_NAME"
+
+# Wipe out all network cards
+destroy_all_vifs_of "$GUEST_NAME"
+
+# Add only one interface to prepare the guest template
+add_interface "$GUEST_NAME" "$MGT_BRIDGE_OR_NET_NAME" "0"
+
+# start the VM to run the prepare steps
+xe vm-start vm="$GUEST_NAME"
+
+# Wait for prep script to finish and shutdown system
+wait_for_VM_to_halt
+
+## Setup network cards
+# Wipe out all
+destroy_all_vifs_of "$GUEST_NAME"
+# Tenant network
+add_interface "$GUEST_NAME" "$VM_BRIDGE_OR_NET_NAME" "$VM_DEV_NR"
+# Management network
+add_interface "$GUEST_NAME" "$MGT_BRIDGE_OR_NET_NAME" "$MGT_DEV_NR"
+# Public network
+add_interface "$GUEST_NAME" "$PUB_BRIDGE_OR_NET_NAME" "$PUB_DEV_NR"
 
 #
 # Inject DevStack inside VM disk
 #
 $THIS_DIR/build_xva.sh "$GUEST_NAME"
 
+# Attach a network interface for the integration network (so that the bridge
+# is created by XenServer). This is required for Neutron. Also pass that as a
+# kernel parameter for DomU
+if is_service_enabled neutron; then
+    attach_network "$XEN_INT_BRIDGE_OR_NET_NAME"
+
+    XEN_INTEGRATION_BRIDGE=$(bridge_for "$XEN_INT_BRIDGE_OR_NET_NAME")
+    append_kernel_cmdline \
+        "$GUEST_NAME" \
+        "xen_integration_bridge=${XEN_INTEGRATION_BRIDGE}"
+fi
+
+FLAT_NETWORK_BRIDGE="${FLAT_NETWORK_BRIDGE:-$(bridge_for "$VM_BRIDGE_OR_NET_NAME")}"
+append_kernel_cmdline "$GUEST_NAME" "flat_network_bridge=${FLAT_NETWORK_BRIDGE}"
+
+# Add a separate xvdb, if it was requested
+if [[ "0" != "$XEN_XVDB_SIZE_GB" ]]; then
+    vm=$(xe vm-list name-label="$GUEST_NAME" --minimal)
+
+    # Add a new disk
+    localsr=$(get_local_sr)
+    extra_vdi=$(xe vdi-create \
+        name-label=xvdb-added-by-devstack \
+        virtual-size="${XEN_XVDB_SIZE_GB}GiB" \
+        sr-uuid=$localsr type=user)
+    xe vbd-create vm-uuid=$vm vdi-uuid=$extra_vdi device=1
+fi
+
 # create a snapshot before the first boot
 # to allow a quick re-run with the same settings
 xe vm-snapshot vm="$GUEST_NAME" new-name-label="$SNAME_FIRST_BOOT"
-
 
 #
 # Run DevStack VM
 #
 xe vm-start vm="$GUEST_NAME"
 
-
-#
-# Find IP and optionally wait for stack.sh to complete
-#
-
-function find_ip_by_name() {
-  local guest_name="$1"
-  local interface="$2"
-  local period=10
-  max_tries=10
-  i=0
-  while true
-  do
-    if [ $i -ge $max_tries ]; then
-      echo "Timed out waiting for devstack ip address"
-      exit 11
-    fi
-
-    devstackip=$(xe vm-list --minimal \
-                 name-label=$guest_name \
-                 params=networks | sed -ne "s,^.*${interface}/ip: \([0-9.]*\).*\$,\1,p")
-    if [ -z "$devstackip" ]
-    then
-      sleep $period
-      ((i++))
-    else
-      echo $devstackip
-      break
-    fi
-  done
-}
-
-function ssh_no_check() {
+function ssh_no_check {
     ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no "$@"
 }
 
-# Note the XenServer needs to be on the chosen
-# network, so XenServer can access Glance API
-if [ $HOST_IP_IFACE == "eth2" ]; then
-    DOMU_IP=$MGT_IP
+# Get hold of the Management IP of OpenStack VM
+OS_VM_MANAGEMENT_ADDRESS=$MGT_IP
+if [ $OS_VM_MANAGEMENT_ADDRESS == "dhcp" ]; then
+    OS_VM_MANAGEMENT_ADDRESS=$(find_ip_by_name $GUEST_NAME $MGT_DEV_NR)
+fi
+
+# Get hold of the Service IP of OpenStack VM
+if [ $HOST_IP_IFACE == "eth${MGT_DEV_NR}" ]; then
+    OS_VM_SERVICES_ADDRESS=$MGT_IP
     if [ $MGT_IP == "dhcp" ]; then
-        DOMU_IP=$(find_ip_by_name $GUEST_NAME 2)
+        OS_VM_SERVICES_ADDRESS=$(find_ip_by_name $GUEST_NAME $MGT_DEV_NR)
     fi
 else
-    DOMU_IP=$PUB_IP
+    OS_VM_SERVICES_ADDRESS=$PUB_IP
     if [ $PUB_IP == "dhcp" ]; then
-        DOMU_IP=$(find_ip_by_name $GUEST_NAME 3)
+        OS_VM_SERVICES_ADDRESS=$(find_ip_by_name $GUEST_NAME $PUB_DEV_NR)
     fi
 fi
+
+# Create an ssh-keypair, and set it up for dom0 user
+rm -f /root/dom0key /root/dom0key.pub
+ssh-keygen -f /root/dom0key -P "" -C "dom0"
+DOMID=$(get_domid "$GUEST_NAME")
+
+xenstore-write /local/domain/$DOMID/authorized_keys/$DOMZERO_USER "$(cat /root/dom0key.pub)"
+xenstore-chmod -u /local/domain/$DOMID/authorized_keys/$DOMZERO_USER r$DOMID
+
+function run_on_appliance {
+    ssh \
+        -i /root/dom0key \
+        -o UserKnownHostsFile=/dev/null \
+        -o StrictHostKeyChecking=no \
+        -o BatchMode=yes \
+        "$DOMZERO_USER@$OS_VM_MANAGEMENT_ADDRESS" "$@"
+}
+
+# Wait until we can log in to the appliance
+while ! run_on_appliance true; do
+    sleep 1
+done
+
+# Remove authenticated_keys updater cronjob
+echo "" | run_on_appliance crontab -
+
+# Generate a passwordless ssh key for domzero user
+echo "ssh-keygen -f /home/$DOMZERO_USER/.ssh/id_rsa -C $DOMZERO_USER@appliance -N \"\" -q" | run_on_appliance
+
+# Authenticate that user to dom0
+run_on_appliance cat /home/$DOMZERO_USER/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys
 
 # If we have copied our ssh credentials, use ssh to monitor while the installation runs
 WAIT_TILL_LAUNCH=${WAIT_TILL_LAUNCH:-1}
@@ -369,43 +386,44 @@ COPYENV=${COPYENV:-1}
 if [ "$WAIT_TILL_LAUNCH" = "1" ]  && [ -e ~/.ssh/id_rsa.pub  ] && [ "$COPYENV" = "1" ]; then
     set +x
 
-    echo "VM Launched - Waiting for startup script"
-    # wait for log to appear
-    while ! ssh_no_check -q stack@$DOMU_IP "[ -e run.sh.log ]"; do
+    echo "VM Launched - Waiting for devstack to start"
+    while ! ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS "service devstack status | grep -q running"; do
         sleep 10
     done
-    echo -n "Running"
-    while [ `ssh_no_check -q stack@$DOMU_IP pgrep -c run.sh` -ge 1 ]
-    do
+    echo -n "devstack service is running, waiting for stack.sh to start logging..."
+
+    while ! ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS "test -e /tmp/devstack/log/stack.log"; do
         sleep 10
-        echo -n "."
     done
-    echo "done!"
     set -x
 
-    # output the run.sh.log
-    ssh_no_check -q stack@$DOMU_IP 'cat run.sh.log'
+    # Watch devstack's output (which doesn't start until stack.sh is running,
+    # but wait for run.sh (which starts stack.sh) to exit as that is what
+    # hopefully writes the succeeded cookie.
+    pid=`ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS pgrep run.sh`
+    ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS "tail --pid $pid -n +1 -f /tmp/devstack/log/stack.log"
 
-    # Fail if the expected text is not found
-    ssh_no_check -q stack@$DOMU_IP 'cat run.sh.log' | grep -q 'stack.sh completed in'
+    # Fail if devstack did not succeed
+    ssh_no_check -q stack@$OS_VM_MANAGEMENT_ADDRESS 'test -e /var/run/devstack.succeeded'
 
     set +x
     echo "################################################################################"
     echo ""
     echo "All Finished!"
     echo "You can visit the OpenStack Dashboard"
-    echo "at http://$DOMU_IP, and contact other services at the usual ports."
+    echo "at http://$OS_VM_SERVICES_ADDRESS, and contact other services at the usual ports."
 else
     set +x
     echo "################################################################################"
     echo ""
     echo "All Finished!"
     echo "Now, you can monitor the progress of the stack.sh installation by "
-    echo "tailing /opt/stack/run.sh.log from within your domU."
+    echo "looking at the console of your domU / checking the log files."
     echo ""
-    echo "ssh into your domU now: 'ssh stack@$DOMU_IP' using your password"
-    echo "and then do: 'tail -f /opt/stack/run.sh.log'"
+    echo "ssh into your domU now: 'ssh stack@$OS_VM_MANAGEMENT_ADDRESS' using your password"
+    echo "and then do: 'sudo service devstack status' to check if devstack is still running."
+    echo "Check that /var/run/devstack.succeeded exists"
     echo ""
-    echo "When the script completes, you can then visit the OpenStack Dashboard"
-    echo "at http://$DOMU_IP, and contact other services at the usual ports."
+    echo "When devstack completes, you can visit the OpenStack Dashboard"
+    echo "at http://$OS_VM_SERVICES_ADDRESS, and contact other services at the usual ports."
 fi

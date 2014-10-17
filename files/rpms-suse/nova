@@ -1,20 +1,21 @@
 curl
-# Note: we need to package dhcp_release in dnsmasq!
 dnsmasq
+dnsmasq-utils # dist:opensuse-12.3,opensuse-13.1
+conntrack-tools
 ebtables
 gawk
 genisoimage # required for config_drive
 iptables
 iputils
 kpartx
-kvm
+kvm # NOPRIME
 # qemu as fallback if kvm cannot be used
-qemu
+qemu # NOPRIME
 libvirt # NOPRIME
-libvirt-python
-libxml2-python
-mysql-community-server # NOPRIME
+libvirt-python # NOPRIME
+mariadb # NOPRIME
 parted
+polkit
 python-M2Crypto
 python-m2crypto # dist:sle11sp2
 python-Paste
@@ -22,22 +23,19 @@ python-PasteDeploy
 python-Routes
 python-SQLAlchemy
 python-Tempita
-python-boto
-python-carrot
 python-cheetah
 python-eventlet
 python-feedparser
 python-greenlet
 python-iso8601
-python-kombu
+python-libxml2
 python-lockfile
 python-lxml # needed for glance which is needed for nova --- this shouldn't be here
 python-mox
 python-mysql
-python-netaddr
+python-mysql-connector-python
 python-numpy # needed by websockify for spice console
 python-paramiko
-python-python-gflags
 python-sqlalchemy-migrate
 python-suds
 python-xattr # needed for glance which is needed for nova --- this shouldn't be here

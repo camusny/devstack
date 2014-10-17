@@ -42,7 +42,8 @@ NOW=$(date "+%s")
 LAST_RUN=$(head -1 $PREREQ_RERUN_MARKER 2>/dev/null || echo "0")
 DELTA=$(($NOW - $LAST_RUN))
 if [[ $DELTA -lt $PREREQ_RERUN_SECONDS && -z "$FORCE_PREREQ" ]]; then
-    echo "Re-run time has not expired ($(($PREREQ_RERUN_SECONDS - $DELTA)) seconds remaining); exiting..."
+    echo "Re-run time has not expired ($(($PREREQ_RERUN_SECONDS - $DELTA)) seconds remaining) "
+    echo "and FORCE_PREREQ not set; exiting..."
     return 0
 fi
 
@@ -54,7 +55,13 @@ export_proxy_variables
 # ================
 
 # Install package requirements
-install_package $(get_packages $ENABLED_SERVICES)
+PACKAGES=$(get_packages general $ENABLED_SERVICES)
+if is_ubuntu && echo $PACKAGES | grep -q dkms ; then
+    # ensure headers for the running kernel are installed for any DKMS builds
+    PACKAGES="$PACKAGES linux-headers-$(uname -r)"
+fi
+
+install_package $PACKAGES
 
 if [[ -n "$SYSLOG" && "$SYSLOG" != "False" ]]; then
     if is_ubuntu || is_fedora; then

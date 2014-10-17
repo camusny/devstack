@@ -10,7 +10,7 @@ echo "Begin DevStack Exercise: $0"
 echo "*********************************************************************"
 
 # This script exits on an error so that errors don't compound and you see
-# only the first error that occured.
+# only the first error that occurred.
 set -o errexit
 
 # Print the commands being run so that we can see the command that triggers
@@ -38,6 +38,10 @@ source $TOP_DIR/exerciserc
 rm -f $TOP_DIR/cacert.pem
 rm -f $TOP_DIR/cert.pem
 rm -f $TOP_DIR/pk.pem
+
+# If nova api is not enabled we exit with exitcode 55 so that
+# the exercise is skipped
+is_service_enabled n-api || exit 55
 
 # Get Certificates
 nova x509-get-root-cert $TOP_DIR/cacert.pem

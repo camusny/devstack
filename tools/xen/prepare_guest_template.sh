@@ -15,16 +15,25 @@
 # The resultant image is started by install_os_domU.sh,
 # and once the VM has shutdown, build_xva.sh is run
 
-# Exit on errors
 set -o errexit
-# Echo commands
+set -o nounset
 set -o xtrace
 
 # This directory
 TOP_DIR=$(cd $(dirname "$0") && pwd)
 
+# Source lower level functions
+. $TOP_DIR/../../functions
+
 # Include onexit commands
 . $TOP_DIR/scripts/on_exit.sh
+
+# xapi functions
+. $TOP_DIR/functions
+
+# Determine what system we are running on.
+# Might not be XenServer if we're using xenserver-core
+GetDistro
 
 # Source params - override xenrc params in your localrc to suite your taste
 source xenrc
@@ -61,7 +70,7 @@ if [ -e "$ISO_DIR" ]; then
 else
     echo "WARNING: no XenServer tools found, falling back to 5.6 tools"
     TOOLS_URL="https://github.com/downloads/citrix-openstack/warehouse/xe-guest-utilities_5.6.100-651_amd64.deb"
-    wget $TOOLS_URL -O $XS_TOOLS_FILE_NAME
+    curl --no-sessionid -L -o "$XS_TOOLS_FILE_NAME" $TOOLS_URL
     cp $XS_TOOLS_FILE_NAME "${STAGING_DIR}${XS_TOOLS_PATH}"
     rm -rf $XS_TOOLS_FILE_NAME
 fi
@@ -75,7 +84,12 @@ cp $STAGING_DIR/etc/rc.local $STAGING_DIR/etc/rc.local.preparebackup
 
 # run prepare_guest.sh on boot
 cat <<EOF >$STAGING_DIR/etc/rc.local
-GUEST_PASSWORD=$GUEST_PASSWORD STAGING_DIR=/ \
-    DO_TGZ=0 XS_TOOLS_PATH=$XS_TOOLS_PATH \
-    bash /opt/stack/prepare_guest.sh > /opt/stack/prepare_guest.log 2>&1
+#!/bin/sh -e
+bash /opt/stack/prepare_guest.sh \\
+    "$GUEST_PASSWORD" "$XS_TOOLS_PATH" "$STACK_USER" "$DOMZERO_USER" \\
+    > /opt/stack/prepare_guest.log 2>&1
 EOF
+
+# Need to set barrier=0 to avoid a Xen bug
+# https://bugs.launchpad.net/ubuntu/+source/linux/+bug/824089
+sed -i -e 's/errors=/barrier=0,errors=/' $STAGING_DIR/etc/fstab

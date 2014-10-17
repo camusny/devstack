@@ -32,7 +32,7 @@ function get_mount_device() {
   vbd_uuid=$1
 
   dev=$(xe_min vbd-list params=device uuid="$vbd_uuid")
-  if [[ "$dev" =~ "sm/" ]]; then
+  if [[ "$dev" =~ "sm/" || "$dev" =~ "blktap-2/" ]]; then
     DEBIAN_FRONTEND=noninteractive \
         apt-get --option "Dpkg::Options::=--force-confold" --assume-yes \
         install kpartx &> /dev/null || true
@@ -41,7 +41,17 @@ function get_mount_device() {
        echo "Failed to find mapping"
        exit -1
     fi
-    echo "/dev/mapper/${mapping}"
+
+    local device="/dev/mapper/${mapping}"
+    for (( i = 0; i < 5; i++ )) ; do
+        if [ -b $device ] ; then
+            echo $device
+            return
+        fi
+        sleep 1
+    done
+    echo "ERROR: timed out waiting for dev-mapper"
+    exit 1
   else
     echo "/dev/$dev$part"
   fi
@@ -49,7 +59,7 @@ function get_mount_device() {
 
 function clean_dev_mappings() {
   dev=$(xe_min vbd-list params=device uuid="$vbd_uuid")
-  if [[ "$dev" =~ "sm/" ]]; then
+  if [[ "$dev" =~ "sm/" || "$dev" =~ "blktap-2/" ]]; then
     kpartx -dv "/dev/$dev"
   fi
 }

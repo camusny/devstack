@@ -1,15 +1,12 @@
 curl
-gcc
 memcached
 python-configobj
 python-coverage
-python-devel
 python-eventlet
 python-greenlet
 python-netifaces
 python-nose
-python-paste-deploy
-python-setuptools
+python-paste-deploy # dist:f19,f20,rhel7
 python-simplejson
 python-webob
 pyxattr

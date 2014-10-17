@@ -1,11 +1,11 @@
 # Trema
-gcc
 make
 ruby1.8
 rubygems1.8
 ruby1.8-dev
 libpcap-dev
 libsqlite3-dev
+libglib2.0-dev
 
 # Sliceable Switch
 sqlite3

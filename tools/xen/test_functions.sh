@@ -29,6 +29,9 @@ function before_each_test {
 
     XE_CALLS=$(mktemp)
     truncate -s 0 $XE_CALLS
+
+    DEAD_MESSAGES=$(mktemp)
+    truncate -s 0 $DEAD_MESSAGES
 }
 
 # Teardown
@@ -62,6 +65,10 @@ function assert_xe_min {
 
 function assert_xe_param {
     grep -qe "^$1\$" $XE_CALLS
+}
+
+function assert_died_with {
+    diff -u <(echo "$1") $DEAD_MESSAGES
 }
 
 function mock_out {
@@ -109,16 +116,22 @@ function test_no_plugin_directory_found {
     grep "[ -d /usr/lib/xcp/plugins/ ]" $LIST_OF_ACTIONS
 }
 
-function test_zip_snapshot_location {
+function test_zip_snapshot_location_http {
     diff \
-    <(zip_snapshot_location "https://github.com/openstack/nova.git" "master") \
-    <(echo "https://github.com/openstack/nova/zipball/master")
+    <(zip_snapshot_location "http://github.com/openstack/nova.git" "master") \
+    <(echo "http://github.com/openstack/nova/zipball/master")
+}
+
+function test_zip_snapsot_location_git {
+    diff \
+    <(zip_snapshot_location "git://github.com/openstack/nova.git" "master") \
+    <(echo "http://github.com/openstack/nova/zipball/master")
 }
 
 function test_create_directory_for_kernels {
     (
         . mocks
-        mock_out get_local_sr uuid1
+        mock_out get_local_sr_path /var/run/sr-mount/uuid1
         create_directory_for_kernels
     )
 
@@ -138,6 +151,29 @@ function test_create_directory_for_kernels_existing_dir {
 EOF
 }
 
+function test_create_directory_for_images {
+    (
+        . mocks
+        mock_out get_local_sr_path /var/run/sr-mount/uuid1
+        create_directory_for_images
+    )
+
+    assert_directory_exists "/var/run/sr-mount/uuid1/os-images"
+    assert_symlink "/images" "/var/run/sr-mount/uuid1/os-images"
+}
+
+function test_create_directory_for_images_existing_dir {
+    (
+        . mocks
+        given_directory_exists "/images"
+        create_directory_for_images
+    )
+
+    diff -u $LIST_OF_ACTIONS - << EOF
+[ -d /images ]
+EOF
+}
+
 function test_extract_remote_zipball {
     local RESULT=$(. mocks && extract_remote_zipball "someurl")
 
@@ -148,6 +184,15 @@ rm -f tempfile
 EOF
 
     [ "$RESULT" = "tempdir" ]
+}
+
+function test_extract_remote_zipball_wget_fail {
+    set +e
+
+    local IGNORE
+    IGNORE=$(. mocks && extract_remote_zipball "failurl")
+
+    assert_died_with "Failed to download [failurl]"
 }
 
 function test_find_nova_plugins {
@@ -167,8 +212,7 @@ function test_get_local_sr {
 
     [ "$RESULT" == "uuid123" ]
 
-    assert_xe_min
-    assert_xe_param "sr-list" "name-label=Local storage"
+    assert_xe_param "pool-list" params=default-SR minimal=true
 }
 
 function test_get_local_sr_path {
@@ -183,16 +227,14 @@ function test_get_local_sr_path {
 }
 
 [ "$1" = "run_tests" ] && {
-    for testname in $($0)
-    do
+    for testname in $($0); do
         echo "$testname"
         before_each_test
         (
             set -eux
             $testname
         )
-        if [ "$?" != "0" ]
-        then
+        if [ "$?" != "0" ]; then
             echo "FAIL"
             exit 1
         else

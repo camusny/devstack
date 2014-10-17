@@ -9,7 +9,7 @@ echo "Begin DevStack Exercise: $0"
 echo "*********************************************************************"
 
 # This script exits on an error so that errors don't compound and you see
-# only the first error that occured.
+# only the first error that occurred.
 set -o errexit
 
 # Print the commands being run so that we can see the command that triggers
@@ -30,13 +30,15 @@ source $TOP_DIR/functions
 # Import configuration
 source $TOP_DIR/openrc
 
-# Import quantum functions if needed
-if is_service_enabled quantum; then
-    source $TOP_DIR/lib/quantum
-fi
+# Import project functions
+source $TOP_DIR/lib/neutron
 
 # Import exercise configuration
 source $TOP_DIR/exerciserc
+
+# If nova api is not enabled we exit with exitcode 55 so that
+# the exercise is skipped
+is_service_enabled n-api || exit 55
 
 # Instance type to create
 DEFAULT_INSTANCE_TYPE=${DEFAULT_INSTANCE_TYPE:-m1.tiny}
@@ -56,6 +58,8 @@ TEST_FLOATING_POOL=${TEST_FLOATING_POOL:-test}
 # Instance name
 VM_NAME="ex-float"
 
+# Cells does not support floating ips API calls
+is_service_enabled n-cell && exit 55
 
 # Launching a server
 # ==================
@@ -67,10 +71,10 @@ nova list
 # ------
 
 # List the images available
-glance image-list
+openstack image list
 
 # Grab the id of the image to launch
-IMAGE=$(glance image-list | egrep " $DEFAULT_IMAGE_NAME " | get_field 1)
+IMAGE=$(openstack image list | egrep " $DEFAULT_IMAGE_NAME " | get_field 1)
 die_if_not_set $LINENO IMAGE "Failure getting image $DEFAULT_IMAGE_NAME"
 
 # Security Groups
@@ -108,7 +112,8 @@ nova flavor-list
 INSTANCE_TYPE=$(nova flavor-list | grep $DEFAULT_INSTANCE_TYPE | get_field 1)
 if [[ -z "$INSTANCE_TYPE" ]]; then
     # grab the first flavor in the list to launch if default doesn't exist
-   INSTANCE_TYPE=$(nova flavor-list | head -n 4 | tail -n 1 | get_field 1)
+    INSTANCE_TYPE=$(nova flavor-list | head -n 4 | tail -n 1 | get_field 1)
+    die_if_not_set $LINENO INSTANCE_TYPE "Failure retrieving INSTANCE_TYPE"
 fi
 
 # Clean-up from previous runs
@@ -121,7 +126,7 @@ fi
 # Boot instance
 # -------------
 
-VM_UUID=$(nova boot --flavor $INSTANCE_TYPE --image $IMAGE --security_groups=$SECGROUP $VM_NAME | grep ' id ' | get_field 2)
+VM_UUID=$(nova boot --flavor $INSTANCE_TYPE --image $IMAGE --security-groups=$SECGROUP $VM_NAME | grep ' id ' | get_field 2)
 die_if_not_set $LINENO VM_UUID "Failure launching $VM_NAME"
 
 # Check that the status is active within ACTIVE_TIMEOUT seconds
@@ -130,7 +135,7 @@ if ! timeout $ACTIVE_TIMEOUT sh -c "while ! nova show $VM_UUID | grep status | g
 fi
 
 # Get the instance IP
-IP=$(nova show $VM_UUID | grep "$PRIVATE_NETWORK_NAME" | get_field 2)
+IP=$(get_instance_ip $VM_UUID $PRIVATE_NETWORK_NAME)
 die_if_not_set $LINENO IP "Failure retrieving IP address"
 
 # Private IPs can be pinged in single node deployments
@@ -155,7 +160,7 @@ nova add-floating-ip $VM_UUID $FLOATING_IP || \
 # Test we can ping our floating IP within ASSOCIATE_TIMEOUT seconds
 ping_check "$PUBLIC_NETWORK_NAME" $FLOATING_IP $ASSOCIATE_TIMEOUT
 
-if ! is_service_enabled quantum; then
+if ! is_service_enabled neutron; then
     # Allocate an IP from second floating pool
     TEST_FLOATING_IP=$(nova floating-ip-create $TEST_FLOATING_POOL | grep $TEST_FLOATING_POOL | get_field 1)
     die_if_not_set $LINENO TEST_FLOATING_IP "Failure creating floating IP in $TEST_FLOATING_POOL"
@@ -163,15 +168,19 @@ if ! is_service_enabled quantum; then
     # list floating addresses
     if ! timeout $ASSOCIATE_TIMEOUT sh -c "while ! nova floating-ip-list | grep $TEST_FLOATING_POOL | grep -q $TEST_FLOATING_IP; do sleep 1; done"; then
         die $LINENO "Floating IP not allocated"
-     fi
+    fi
 fi
 
 # Dis-allow icmp traffic (ping)
 nova secgroup-delete-rule $SECGROUP icmp -1 -1 0.0.0.0/0 || \
     die $LINENO "Failure deleting security group rule from $SECGROUP"
 
+if ! timeout $ASSOCIATE_TIMEOUT sh -c "while nova secgroup-list-rules $SECGROUP | grep -q icmp; do sleep 1; done"; then
+    die $LINENO "Security group rule not deleted from $SECGROUP"
+fi
+
 # FIXME (anthony): make xs support security groups
-if [ "$VIRT_DRIVER" != "xenserver" -a "$VIRT_DRIVER" != "openvz" ]; then
+if [ "$VIRT_DRIVER" != "ironic" -a "$VIRT_DRIVER" != "xenserver" -a "$VIRT_DRIVER" != "openvz" ]; then
     # Test we can aren't able to ping our floating ip within ASSOCIATE_TIMEOUT seconds
     ping_check "$PUBLIC_NETWORK_NAME" $FLOATING_IP $ASSOCIATE_TIMEOUT Fail
 fi
@@ -179,7 +188,7 @@ fi
 # Clean up
 # --------
 
-if ! is_service_enabled quantum; then
+if ! is_service_enabled neutron; then
     # Delete second floating IP
     nova floating-ip-delete $TEST_FLOATING_IP || \
         die $LINENO "Failure deleting floating IP $TEST_FLOATING_IP"

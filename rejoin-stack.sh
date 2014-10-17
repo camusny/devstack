@@ -5,6 +5,12 @@
 
 TOP_DIR=`dirname $0`
 
+# Import common functions in case the localrc (loaded via stackrc)
+# uses them.
+source $TOP_DIR/functions
+
+source $TOP_DIR/stackrc
+
 # if screenrc exists, run screen
 if [[ -e $TOP_DIR/stack-screenrc ]]; then
     if screen -ls | egrep -q "[0-9].stack"; then
